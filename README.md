@@ -1,6 +1,6 @@
 # Snowflake Cortex AI Document Assistant
 
-This Repository provides an AI assistant to upload, process and interact with documents
+This Repository provides an AI assistant to upload, process and interact with documents in Natural Language using LLMs
 ## Setup
 All you need to do is to execute the following SQL statements in your Snowflake Account.
 
