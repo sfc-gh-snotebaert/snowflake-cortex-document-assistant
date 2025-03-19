@@ -7,29 +7,31 @@ All you need to do is to execute the following SQL statements in your Snowflake 
 
 
 ```sql
-USE ROLE ACCOUNTADMIN;
+USE ROLE DEMO_ROLE;
 
 -- Create a warehouse
 CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH WITH WAREHOUSE_SIZE='MEDIUM';
 
 -- Create Database
 CREATE DATABASE IF NOT EXISTS DOC_EXTRACTION_DB;
+CREATE SCHEMA IF NOT EXISTS PUBLIC;
+USE SCHEMA PUBLIC;
 
 -- Create the API integration with Github
-CREATE OR REPLACE API INTEGRATION GITHUB_INTEGRATION_CONTRACT_PROCESSING
+CREATE OR REPLACE API INTEGRATION GITHUB_INTEGRATION_CONTRACT_INTELLIGENCE
     api_provider = git_https_api
     api_allowed_prefixes = ('https://github.com/doneyli/')
     enabled = true
     comment='Git integration with Doneyli De Jesus Github Repository.';
 
 -- Create the integration with the Github demo repository
-CREATE GIT REPOSITORY GITHUB_REPO_CORTEX_AGENTS_DEMO
+CREATE OR REPLACE GIT REPOSITORY GITHUB_REPO_CORTEX_CONTRACT_INTELLIGENCE
 	ORIGIN = 'https://github.com/doneyli/snowflake-ai-contract-intelligence' 
 	API_INTEGRATION = 'GITHUB_INTEGRATION_CONTRACT_PROCESSING' 
 	COMMENT = 'Github Repository from Doneyli De Jesus to interact with contracts and legal documents in natural language';
 
 -- Run the installation of the Streamlit App
-EXECUTE IMMEDIATE FROM @CORTEX_AGENTS_DEMO.PUBLIC.GITHUB_REPO_CORTEX_AGENTS_DEMO/branches/main/setup.sql;
+EXECUTE IMMEDIATE FROM @DOC_EXTRACTION_DB.PUBLIC.GITHUB_REPO_CORTEX_CONTRACT_INTELLIGENCE/branches/main/setup.sql;
 
 
 -- Run this script to set up the required Snowflake objects before deploying the Streamlit app
