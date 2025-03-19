@@ -7,7 +7,7 @@ All you need to do is to execute the following SQL statements in your Snowflake 
 
 
 ```sql
-USE ROLE ACCOUNTADMIN;
+USE ROLE DEMO_ROLE;
 
 -- Create a warehouse
 CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH WITH WAREHOUSE_SIZE='X-SMALL';
