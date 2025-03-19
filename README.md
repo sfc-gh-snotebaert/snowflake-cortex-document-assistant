@@ -1,6 +1,6 @@
-# Snowflake Cortex AI Contract Intelligence
+# Snowflake Cortex AI Document Assistant
 
-This Repository provides a document processing interface for contracts and legal documents
+This Repository provides a document processing interface for documents using Natural Language (LLMs)
 
 ## Setup
 All you need to do is to execute the following SQL statements in your Snowflake Account.
