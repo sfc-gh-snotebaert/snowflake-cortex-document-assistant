@@ -13,29 +13,29 @@ CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH WITH WAREHOUSE_SIZE='MEDIUM';
 
 -- Create Database
 CREATE DATABASE IF NOT EXISTS CORTEX_AI_DB;
-CREATE SCHEMA IF NOT EXISTS DOCUMENT_INTELLIGENCE;
-USE SCHEMA DOCUMENT_INTELLIGENCE;
+CREATE SCHEMA IF NOT EXISTS DOCUMENT_ASSISTANT;
+USE SCHEMA DOCUMENT_ASSISTANT;
 
 -- Create the API integration with Github
-CREATE OR REPLACE API INTEGRATION GITHUB_INTEGRATION_CONTRACT_INTELLIGENCE
+CREATE OR REPLACE API INTEGRATION GITHUB_INTEGRATION_DOCUMENT_ASSISTANT
     api_provider = git_https_api
     api_allowed_prefixes = ('https://github.com/doneyli/')
     enabled = true
     comment='Git integration with Doneyli De Jesus Github Repository.';
 
 -- Create the integration with the Github demo repository
-CREATE OR REPLACE GIT REPOSITORY GITHUB_REPO_CONTRACT_INTELLIGENCE
-	ORIGIN = 'https://github.com/doneyli/snowflake-ai-contract-intelligence' 
-	API_INTEGRATION = 'GITHUB_INTEGRATION_CONTRACT_INTELLIGENCE' 
+CREATE OR REPLACE GIT REPOSITORY GITHUB_REPO_DOCUMENT_ASSISTANT
+	ORIGIN = 'https://github.com/doneyli/snowflake-cortex-document-assistant' 
+	API_INTEGRATION = 'GITHUB_INTEGRATION_DOCUMENT_ASSISTANT' 
 	COMMENT = 'Github Repository from Doneyli De Jesus to interact with contracts and legal documents in natural language';
 
 -- Run the installation of the Streamlit App
-EXECUTE IMMEDIATE FROM @CORTEX_AI_DB.DOCUMENT_INTELLIGENCE.GITHUB_REPO_CONTRACT_INTELLIGENCE/branches/main/setup.sql;
+EXECUTE IMMEDIATE FROM @CORTEX_AI_DB.DOCUMENT_ASSISTANT.GITHUB_REPO_DOCUMENT_ASSISTANT/branches/main/setup.sql;
 
 
 -- Run this script to set up the required Snowflake objects before deploying the Streamlit app
 USE DATABASE CORTEX_AI_DB;
-USE SCHEMA DOCUMENT_INTELLIGENCE;;
+USE SCHEMA DOCUMENT_ASSISTANT;;
 
 -- Create stage for storing PDFs
 CREATE OR REPLACE STAGE pdf_contracts_stage 
