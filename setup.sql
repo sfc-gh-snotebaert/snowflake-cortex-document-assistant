@@ -1,7 +1,7 @@
 USE ROLE ACCOUNTADMIN;
 
 -- Fetch most recent files from Github repository
-ALTER GIT REPOSITORY GITHUB_REPO_AI_CONTRACT_INTELLIGENCE FETCH;
+ALTER GIT REPOSITORY GITHUB_REPO_CORTEX_CONTRACT_INTELLIGENCE FETCH;
 
 -- Create Streamlit app with method based on status of Behavior Change Bundle 2025_01
 BEGIN
@@ -13,7 +13,7 @@ BEGIN
       -- Copy Streamlit App into to stage
       COPY FILES
         INTO @STREAMLIT_APP
-        FROM @DOC_EXTRACTION_DB.PUBLIC.GITHUB_REPO_AI_CONTRACT_INTELLIGENCE/branches/main/app/;
+        FROM @DOC_EXTRACTION_DB.PUBLIC.GITHUB_REPO_CORTEX_CONTRACT_INTELLIGENCE/branches/main/app/;
       ALTER STAGE STREAMLIT_APP REFRESH;
 
       -- Create Streamlit App
