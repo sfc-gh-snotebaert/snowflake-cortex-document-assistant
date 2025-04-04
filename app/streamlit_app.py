@@ -23,8 +23,7 @@ root = Root(session)
 # Models for chat
 MODELS = [
     "mistral-large2",
-    "llama3.1-70b",
-    "llama3.1-8b",
+    "claude-3-5-sonnet",
 ]
 
 # Function to calculate MD5 hash of a file
