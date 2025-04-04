@@ -142,7 +142,7 @@ def init_config_options():
     st.sidebar.toggle("Use chat history", key="use_chat_history", value=True)
 
     with st.sidebar.expander("Advanced options"):
-        st.selectbox("Select model:", MODELS, key="model_name", index=1)  # Default to llama3.1-70b
+        st.selectbox("Select model:", MODELS, key="model_name", index=0)  # Default to mistral-large2
         st.number_input(
             "Select number of context chunks",
             value=15,
