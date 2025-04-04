@@ -35,7 +35,7 @@ EXECUTE IMMEDIATE FROM @CORTEX_AI_DB.DOCUMENT_ASSISTANT.GITHUB_REPO_DOCUMENT_ASS
 
 -- Run this script to set up the required Snowflake objects before deploying the Streamlit app
 USE DATABASE CORTEX_AI_DB;
-USE SCHEMA DOCUMENT_ASSISTANT;;
+USE SCHEMA DOCUMENT_ASSISTANT;
 
 -- Create stage for storing PDFs
 CREATE OR REPLACE STAGE pdf_contracts_stage 
