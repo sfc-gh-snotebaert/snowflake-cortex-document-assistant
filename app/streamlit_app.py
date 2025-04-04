@@ -431,7 +431,7 @@ def process_files_with_ai_parallel(file_records, client_name, upload_id):
                             SELECT SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
                                 '@pdf_contracts_stage',
                                 '{relative_path}',
-                                {{'mode': 'LAYOUT'}}
+                                {{'mode': 'OCR'}}
                             )
                         )
                         WHERE file_id = '{file_id}'
