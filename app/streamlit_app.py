@@ -22,8 +22,8 @@ root = Root(session)
 
 # Models for chat
 MODELS = [
-    "mistral-large2",
     "claude-3-5-sonnet",
+    "mistral-large2",
 ]
 
 # Function to calculate MD5 hash of a file
@@ -123,43 +123,6 @@ def init_service_metadata():
                 )
 
         st.session_state.service_metadata = service_metadata
-
-# Setup chat config options
-def init_config_options():
-    """
-    Initialize the configuration options in the Streamlit sidebar for chat.
-    """
-    if st.session_state.service_metadata:
-        st.sidebar.selectbox(
-            "Select cortex search service:",
-            [s["name"] for s in st.session_state.service_metadata],
-            key="selected_cortex_search_service",
-        )
-
-    # Use on_click to call the clear function instead of a session state variable
-    st.sidebar.button("Clear conversation", on_click=clear_chat_history)
-    st.sidebar.toggle("Debug", key="debug", value=False)
-    st.sidebar.toggle("Use chat history", key="use_chat_history", value=True)
-
-    with st.sidebar.expander("Advanced options"):
-        st.selectbox("Select model:", MODELS, key="model_name", index=0)  # Default to mistral-large2
-        st.number_input(
-            "Select number of context chunks",
-            value=15,
-            key="num_retrieved_chunks",
-            min_value=10,
-            max_value=20,
-        )
-        st.number_input(
-            "Select number of messages to use in chat history",
-            value=10,
-            key="num_chat_messages",
-            min_value=1,
-            max_value=10,
-        )
-
-    if st.session_state.debug:
-        st.sidebar.expander("Session State").write(st.session_state)
 
 # Function to generate completions
 def complete(model, prompt):
@@ -326,9 +289,9 @@ def create_prompt(user_question, additional_context=""):
     # Create the base prompt
     prompt = f"""
         [INST]
-        You are an expert legal professional like the fictional character Mike Ross from the show Suits.
+        You are an expert legal professional that analyzes contracts for a living. 
 
-        Review the following question and the provided legal evidence to answer the question in a legally accurate manner. 
+        Review the following question and the provided relevant materials to answer the question in a legally accurate manner. 
 
         Please pay extra attention to the date of the legal details. Always prioritize newer information if there is a contradiction to past information.
 
@@ -341,7 +304,7 @@ def create_prompt(user_question, additional_context=""):
         {user_question}
         </question>
         
-        Please provide a helpful, concise, and accurate response based on the context provided.
+        Please provide a helpful, and accurate response based on the context provided.
         If the answer cannot be determined from the context, just say "I don't have enough information to answer that question."
         [/INST]
         Answer:
@@ -364,7 +327,7 @@ def check_parsed_document_column():
     except Exception:
         return False
 
-# Function to process files with full document parsing, metadata extraction, and chunking in a robust way
+# Function to process files with true parallel processing
 def process_files_with_ai_parallel(file_records, client_name, upload_id):
     if not file_records:
         return False
@@ -372,14 +335,39 @@ def process_files_with_ai_parallel(file_records, client_name, upload_id):
     try:
         # Get all the file paths first
         list_result = session.sql(f"""
-        LIST @pdf_contracts_stage/{client_name}/{upload_id}/
+        LIST @pdf_contracts_stage/{client_name}/{upload_id}/ PATTERN='.*'
         """).collect()
         
-        # Process files in smaller batches to avoid internal errors
-        batch_size = 5  # Process up to 5 files at once
+        # Create a mapping of original filenames to their actual stored filenames
+        file_mapping = {}
+        for row in list_result:
+            if 'name' in row:
+                path = row['name']
+                path_parts = path.split('/')
+                
+                # The structure is expected to be: 
+                # pdf_contracts_stage/client/upload_id/original_filename/stored_filename
+                if len(path_parts) >= 5:
+                    original_dir = path_parts[-2]  # Original filename used as directory
+                    stored_file = path_parts[-1]   # Stored filename
+                    file_mapping[original_dir] = stored_file
+        
+        # Update the stored_filename in file_records based on the mapping
+        for record in file_records:
+            original_filename = record["original_filename"]
+            if original_filename in file_mapping:
+                record["stored_filename"] = file_mapping[original_filename]
+        
+        # Process files in batches for parallelism
+        batch_size = 3  # Process up to 3 files at once in parallel
         total_files = len(file_records)
         processed_files = 0
-        success = True
+        failed_files = 0
+        
+        # Show a progress indicator
+        progress_bar = st.progress(0)
+        processing_status = st.empty()
+        processing_status.info(f"Processing {total_files} files in parallel...")
         
         # Create a single metadata table
         session.sql("""
@@ -391,119 +379,213 @@ def process_files_with_ai_parallel(file_records, client_name, upload_id):
         )
         """).collect()
         
-        # Create chunks table if it doesn't exist
-        session.sql("""
-        CREATE TABLE IF NOT EXISTS LEASE_CHUNKS (
-            FILE_ID VARCHAR,
-            ORIGINAL_FILENAME VARCHAR,
-            STORED_FILENAME VARCHAR,
-            CHUNK VARCHAR
-        )
+        # Check the structure of LEASE_CHUNKS table
+        columns_check = session.sql("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = CURRENT_SCHEMA() 
+            AND table_name = 'LEASE_CHUNKS'
         """).collect()
+        
+        column_names = [col['COLUMN_NAME'] for col in columns_check]
+        
+        # Create or update chunks table with correct structure
+        has_parsed_document = 'PARSED_DOCUMENT' in column_names
+        
+        if not has_parsed_document:
+            # If table exists but doesn't have PARSED_DOCUMENT column
+            if 'LEASE_CHUNKS' in [t['TABLE_NAME'] for t in session.sql("SHOW TABLES").collect()]:
+                session.sql("""
+                ALTER TABLE LEASE_CHUNKS 
+                ADD COLUMN PARSED_DOCUMENT VARCHAR
+                """).collect()
         
         # Process in batches
         for i in range(0, total_files, batch_size):
             batch = file_records[i:i+batch_size]
-            st.write(f"Processing batch {i//batch_size + 1} of {(total_files + batch_size - 1) // batch_size} ({len(batch)} files)...")
             
-            # Process each file in the batch individually
+            # Step 1: Parse documents for the entire batch in parallel
+            parse_futures = []
             for record in batch:
+                file_id = record["file_id"]
+                original_filename = record["original_filename"]
+                stored_filename = record["stored_filename"]
+                
+                # Construct the correct path with original filename as folder and stored filename as file
+                relative_path = f"{client_name}/{upload_id}/{original_filename}/{stored_filename}"
+                
+                # Build parse statement and execute asynchronously
+                parse_stmt = f"""
+                UPDATE contract_pdf_files
+                SET parsed_document = (
+                    SELECT SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
+                        '@pdf_contracts_stage',
+                        '{relative_path}',
+                        {{'mode': 'OCR'}}
+                    )
+                )
+                WHERE file_id = '{file_id}'
+                """
+                
+                parse_futures.append({
+                    'future': session.sql(parse_stmt).collect_nowait(),
+                    'record': record
+                })
+            
+            # Wait for all parsing operations to complete
+            parse_successful_records = []
+            for future_item in parse_futures:
                 try:
-                    file_id = record["file_id"]
-                    original_filename = record["original_filename"]
-                    stored_filename = record["stored_filename"]
-                    
-                    # Find matching files
-                    matching_files = []
-                    for row in list_result:
-                        if 'name' in row and original_filename in row['name']:
-                            matching_files.append(row['name'])
-                    
-                    if matching_files:
-                        relative_path = matching_files[0].split('PDF_CONTRACTS_STAGE/')[1] if 'PDF_CONTRACTS_STAGE/' in matching_files[0] else f"{client_name}/{upload_id}/{original_filename}/{stored_filename}"
-                        
-                        # Step 1: Parse document
-                        st.write(f"Parsing document: {original_filename}")
-                        session.sql(f"""
-                        UPDATE contract_pdf_files
-                        SET parsed_document = (
-                            SELECT SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
-                                '@pdf_contracts_stage',
-                                '{relative_path}',
-                                {{'mode': 'OCR'}}
-                            )
-                        )
-                        WHERE file_id = '{file_id}'
-                        """).collect()
-                        
-                        # Step 2: Extract metadata
-                        st.write(f"Extracting metadata from: {original_filename}")
-                        session.sql(f"""
-                        INSERT INTO LEASE_METADATA
-                        SELECT 
+                    future_item['future'].result()  # Wait for completion
+                    parse_successful_records.append(future_item['record'])
+                except Exception as e:
+                    failed_files += 1
+                    st.error(f"Error parsing {future_item['record']['original_filename']}: {str(e)}")
+            
+            # Step 2: Extract metadata for successfully parsed files in parallel
+            metadata_futures = []
+            for record in parse_successful_records:
+                file_id = record["file_id"]
+                
+                metadata_stmt = f"""
+                INSERT INTO LEASE_METADATA
+                SELECT 
+                    FILE_ID,
+                    ORIGINAL_FILENAME,
+                    STORED_FILENAME,
+                    SNOWFLAKE.CORTEX.COMPLETE('llama3.3-70b',
+                        'I am going to provide a document which will be indexed by a retrieval system containing many similar documents. I want you to provide key information associated with this document that can help differentiate this document in the index. Follow these instructions:
+
+                    1. Do not dwell on low level details. Only provide key high level information that a human might be expected to provide when searching for this doc.
+
+                    2. Do not use any formatting, just provide keys and values using a colon to separate key and value. Have each key and value be on a new line.
+
+                    3. Only extract at most the following information. If you are not confident with pulling any one of these keys, then do not include that key:\n'
+                    ||
+                    ARRAY_TO_STRING(
+                        ARRAY_CONSTRUCT('location',
+                                        'tenant',
+                                        'landlord',
+                                        'lease term',
+                                        'rent',
+                                        'property description',
+                                        'lease type',
+                                        'industry',
+                                        'document type',
+                                        'parties involved',
+                                        'effective date',
+                                        'expiration date',
+                                        'renewal options',
+                                        'termination clauses',
+                                        'dispute resolution',
+                                        'governing law',
+                                        'signatures',
+                                        'amendments',
+                                        'appendices',
+                                        'schedules'),
+                        '\t\t* ')
+                    ||
+                    '\n\nDoc starts here:\n' || SUBSTR(PARSED_DOCUMENT, 0, 4000) || '\nDoc ends here\n\n') AS METADATA
+                FROM 
+                    CONTRACT_PDF_FILES
+                WHERE 
+                    FILE_ID = '{file_id}'
+                """
+                
+                metadata_futures.append({
+                    'future': session.sql(metadata_stmt).collect_nowait(),
+                    'record': record
+                })
+            
+            # Wait for all metadata operations to complete
+            metadata_successful_records = []
+            for future_item in metadata_futures:
+                try:
+                    future_item['future'].result()  # Wait for completion
+                    metadata_successful_records.append(future_item['record'])
+                except Exception as e:
+                    failed_files += 1
+                    st.error(f"Error extracting metadata for {future_item['record']['original_filename']}: {str(e)}")
+            
+            # Step 3: Create chunks for files with successful metadata in parallel
+            chunk_futures = []
+            for record in metadata_successful_records:
+                file_id = record["file_id"]
+                
+                chunk_stmt = f"""
+                INSERT INTO LEASE_CHUNKS (
+                                    FILE_ID,
+                                    ORIGINAL_FILENAME,
+                                    STORED_FILENAME,
+                                    PARSED_DOCUMENT,
+                                    CHUNK
+                                )
+                    WITH SPLIT_TEXT_CHUNKS AS (
+                        SELECT
                             FILE_ID,
                             ORIGINAL_FILENAME,
                             STORED_FILENAME,
-                            SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b', 
-                                CONCAT($$Extract the following information from the lease in JSON format as follows. Just provide the JSON: 
-                                        [METADATA {{
-                                        'commencement_date' : 'value',
-                                        'location': 'value', 
-                                        'street': 'value', 
-                                        'city': 'value',
-                                        'province': 'value', 
-                                        'landlord': 'value', 
-                                        'tenant': 'value' }} ] $$, 
-                                    PARSED_DOCUMENT ) ) AS METADATA
-                        FROM 
-                            CONTRACT_PDF_FILES
-                        WHERE 
-                            FILE_ID = '{file_id}'
-                        """).collect()
-                        
-                        # Step 3: Create chunks
-                        st.write(f"Creating chunks for: {original_filename}")
-                        session.sql(f"""
-                        INSERT INTO LEASE_CHUNKS
-                        SELECT
-                            cf.FILE_ID,
-                            cf.ORIGINAL_FILENAME,
-                            cf.STORED_FILENAME,
-                            cf.PARSED_DOCUMENT,
-                            c.VALUE || (SELECT METADATA FROM LEASE_METADATA WHERE FILE_ID = '{file_id}') AS chunk
+                            PARSED_DOCUMENT,
+                            C.VALUE AS CHUNK,
                         FROM
-                            CONTRACT_PDF_FILES cf,
-                            LATERAL FLATTEN( 
-                                SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER (
-                                    cf.parsed_document,
-                                    'markdown',
-                                    1200,
-                                    120 
-                                ) 
-                            ) c
-                        WHERE 
-                            cf.FILE_ID = '{file_id}'
-                        """).collect()
-                        
-                        processed_files += 1
-                        st.success(f"✅ Completed processing {original_filename}")
-                    else:
-                        st.error(f"Could not find file in stage: {original_filename}")
+                        CONTRACT_PDF_FILES,
+                        LATERAL FLATTEN( input => SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER (
+                            PARSED_DOCUMENT,
+                            'none',
+                            1800, -- SET CHUNK SIZE
+                            300 -- SET CHUNK OVERLAP
+                        )) C
+                    )
+                    SELECT
+                        C.FILE_ID,
+                        C.ORIGINAL_FILENAME,
+                        C.STORED_FILENAME,
+                        C.PARSED_DOCUMENT,
+                        CONCAT(M.METADATA, '\n\n', C.CHUNK) AS CONTEXTUALIZED_CHUNK,
+                    FROM
+                        SPLIT_TEXT_CHUNKS C
+                    JOIN
+                        LEASE_METADATA M ON C.FILE_ID = M.FILE_ID
+                    WHERE 
+                        C.FILE_ID = '{file_id}'
+                """
+                
+                chunk_futures.append({
+                    'future': session.sql(chunk_stmt).collect_nowait(),
+                    'record': record
+                })
+            
+            # Wait for all chunk creation operations to complete
+            for future_item in chunk_futures:
+                try:
+                    future_item['future'].result()  # Wait for completion
+                    processed_files += 1  # Only count as processed if all steps succeed
                 except Exception as e:
-                    st.error(f"Error processing {original_filename}: {str(e)}")
-                    # Continue with next file
+                    failed_files += 1
+                    st.error(f"Error creating chunks for {future_item['record']['original_filename']}: {str(e)}")
+            
+            # Update progress bar
+            progress = ((processed_files + failed_files) / total_files)
+            processing_status.info(f"Processing files... ({processed_files + failed_files}/{total_files})")
+            progress_bar.progress(progress)
         
+        # Complete the progress bar
+        progress_bar.progress(1.0)
+        
+        # Show final summary
         if processed_files == total_files:
-            st.success(f"✅ Successfully processed all {total_files} files")
+            processing_status.success(f"✅ Successfully processed all {total_files} files")
+        elif processed_files > 0:
+            processing_status.warning(f"⚠️ Processed {processed_files} of {total_files} files ({failed_files} failed)")
         else:
-            st.warning(f"⚠️ Processed {processed_files} of {total_files} files with some errors")
+            processing_status.error(f"❌ Failed to process any files")
         
         return processed_files > 0
     except Exception as e:
         st.error(f"Error during processing: {str(e)}")
         return False
 
-# Function to save uploaded files to Snowflake stage with MD5 hash-based deduplication
+# Function to save uploaded files to Snowflake stage without deduplication checks
 def save_files_to_stage(upload_id, client_name, uploaded_files):
     # Check if parsed_document column exists
     has_parsed_document = check_parsed_document_column()
@@ -513,38 +595,10 @@ def save_files_to_stage(upload_id, client_name, uploaded_files):
     file_records = []
     
     for uploaded_file in uploaded_files:
-        # Calculate MD5 hash and use it as the file_id
+        # Generate a unique ID for each file upload instead of using MD5 hash
+        file_id = str(uuid.uuid4())
+        
         file_content = uploaded_file.getvalue()
-        file_id = calculate_md5(file_content)
-        
-        # Check if file already exists and its processing status
-        file_exists, is_parsed, metadata_exists, chunks_exist, existing_files = check_file_exists(file_id)
-        
-        if file_exists:
-            # Determine complete processing status
-            fully_processed = is_parsed and metadata_exists and chunks_exist
-            
-            if fully_processed:
-                # File exists and has been fully processed
-                for existing_file in existing_files:
-                    st.warning(f"File '{uploaded_file.name}' already exists as '{existing_file['ORIGINAL_FILENAME']}' (uploaded for client {existing_file['CLIENT_NAME']})")
-                continue
-            else:
-                # File exists but wasn't fully processed
-                status_msg = "File was previously uploaded but "
-                if not is_parsed:
-                    status_msg += "document parsing failed."
-                elif not metadata_exists:
-                    status_msg += "metadata extraction failed."
-                elif not chunks_exist:
-                    status_msg += "chunking failed."
-                    
-                # Offer to reprocess
-                reprocess = st.checkbox(f"File '{uploaded_file.name}': {status_msg} Reprocess it?", value=True)
-                if not reprocess:
-                    continue
-                # If user wants to reprocess, we'll continue with the upload
-        
         original_filename = uploaded_file.name
         file_extension = os.path.splitext(original_filename)[1]
         
@@ -565,10 +619,6 @@ def save_files_to_stage(upload_id, client_name, uploaded_files):
             
             # Extract the actual staged filename from the result
             if result and len(result) > 0:
-                # The result structure can vary based on API version
-                # Debug the structure
-                st.write("Upload result structure:", result)
-                
                 # Try to extract the staged filename
                 staged_filename = None
                 
@@ -578,15 +628,12 @@ def save_files_to_stage(upload_id, client_name, uploaded_files):
                 # If result is a list of dictionaries 
                 elif isinstance(result[0], dict) and 'target' in result[0]:
                     staged_filename = result[0]['target']
-                # If we can't extract it properly, list the directory to find it
                 
                 if not staged_filename or '@pdf_contracts_stage' not in staged_filename:
                     # List files in the directory to find our file
                     list_result = session.sql(f"""
                     LIST @pdf_contracts_stage/{client_name}/{upload_id}/
                     """).collect()
-                    
-                    st.write("Files in stage:", list_result)
                     
                     # Find the most recently added file (likely our upload)
                     if list_result and len(list_result) > 0:
@@ -602,9 +649,6 @@ def save_files_to_stage(upload_id, client_name, uploaded_files):
                     
                 # Store the full stage path
                 full_stage_path = f"@pdf_contracts_stage/{client_name}/{upload_id}/{staged_filename}"
-                
-                st.write(f"Original filename: {original_filename}")
-                st.write(f"Staged as: {staged_filename}")
             else:
                 # Fallback if we can't get the actual filename
                 staged_filename = original_filename
@@ -615,12 +659,12 @@ def save_files_to_stage(upload_id, client_name, uploaded_files):
             staged_filename = original_filename
             full_stage_path = f"@pdf_contracts_stage/{client_name}/{upload_id}/{staged_filename}"
         
-        # Add record to our tracking with MD5 hash as file_id
+        # Add record to our tracking with unique file_id
         file_records.append({
-            "file_id": file_id,  # Using MD5 hash as file_id
+            "file_id": file_id,  # Using UUID as file_id instead of MD5 hash
             "upload_id": upload_id,
             "original_filename": original_filename,
-            "stored_filename": staged_filename,  # Store the actual filename in Snowflake (with tmp prefix)
+            "stored_filename": staged_filename,
             "file_path": full_stage_path,
             "upload_timestamp": upload_timestamp,
             "file_size": len(file_content)
@@ -781,7 +825,7 @@ def render_chat_interface(client_name=None, upload_id=None):
                 prompt, results = create_prompt(question_safe, additional_context)
                 
                 if "model_name" not in st.session_state:
-                    st.session_state.model_name = "llama3.1-70b"
+                    st.session_state.model_name = "claude-3-5-sonnet"
                     
                 generated_response = complete(st.session_state.model_name, prompt)
                 
@@ -799,15 +843,129 @@ def render_chat_interface(client_name=None, upload_id=None):
                 {"role": "assistant", "content": generated_response}
             )
 
+# Function to check if client name already exists
+def check_client_name_exists(client_name):
+    """Check if a client name already exists in the database"""
+    try:
+        result = session.sql(f"""
+        SELECT COUNT(*) as client_count
+        FROM client_contract_uploads
+        WHERE client_name = '{client_name}'
+        """).collect()
+        
+        return result[0]['CLIENT_COUNT'] > 0
+    except Exception as e:
+        st.error(f"Error checking client name: {str(e)}")
+        return False
+
+# Setup minimal chat config options
+def init_config_options():
+    """
+    Initialize the configuration options for chat with default values.
+    Only show the Clear Conversation button in the sidebar.
+    All other settings are initialized with default values but not displayed.
+    """
+    # Only show the clear conversation button in the sidebar
+    st.sidebar.button("Clear conversation", on_click=clear_chat_history)
+    
+    # Initialize settings with default values (without displaying them)
+    if "model_name" not in st.session_state:
+        st.session_state.model_name = MODELS[0]  # Default to first model in list
+        
+    if "num_retrieved_chunks" not in st.session_state:
+        st.session_state.num_retrieved_chunks = 200
+        
+    if "num_chat_messages" not in st.session_state:
+        st.session_state.num_chat_messages = 10
+        
+    if "use_chat_history" not in st.session_state:
+        st.session_state.use_chat_history = True
+        
+    if "debug" not in st.session_state:
+        st.session_state.debug = False
+    
+    # Initialize cortex search service if available
+    if "service_metadata" in st.session_state and st.session_state.service_metadata and "selected_cortex_search_service" not in st.session_state:
+        # Set the first available service as default
+        st.session_state.selected_cortex_search_service = st.session_state.service_metadata[0]["name"]
+
 # Main application
 def main():
     # Verify required Snowflake objects exist
     verify_snowflake_objects()
     
-    # Add sidebar navigation
-    st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Upload Contracts", "Contract Chat"])
+    # Initialize session state variables if they don't exist
+    if 'upload_complete' not in st.session_state:
+        st.session_state.upload_complete = False
     
+    # Initialize the current page in session state if not already set
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = "Upload Contracts"
+    
+    # Keep track of previous page to detect page changes
+    previous_page = st.session_state.get("previous_page", None)
+    
+    # Add sidebar navigation - clean and minimal
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio("Go to", ["Upload Contracts", "Contract Chat"], 
+                           index=0 if st.session_state.current_page == "Upload Contracts" else 1,
+                           key="navigation")
+    
+    # Update current page based on navigation
+    st.session_state.current_page = page
+    
+    # Add document selection dropdown in sidebar only if on Contract Chat page
+    if page == "Contract Chat":
+        st.sidebar.markdown("---")  # Add a separator
+        
+        # Fetch available uploads for the dropdown
+        try:
+            uploads = session.sql("""
+            SELECT upload_id, client_name, upload_timestamp, num_files 
+            FROM client_contract_uploads 
+            ORDER BY upload_timestamp DESC
+            """).collect()
+            
+            if uploads and len(uploads) > 0:
+                # Create dropdown options - show only client name
+                upload_options = [row['CLIENT_NAME'] for row in uploads]
+                
+                # Track previous selection
+                previous_selection = st.session_state.get("selected_upload_idx", None)
+                
+                # Add a dropdown to select documents
+                st.sidebar.markdown("### Document Selection")
+                selected_idx = st.sidebar.selectbox(
+                    "Choose documents to chat about:", 
+                    range(len(upload_options)),
+                    format_func=lambda x: upload_options[x],
+                    key="selected_upload_idx"
+                )
+                
+                # If selection changed, clear chat history
+                if previous_selection != selected_idx and previous_selection is not None:
+                    if "messages" in st.session_state:
+                        st.session_state.messages = []
+                
+                # Update client_name and upload_id based on selection
+                if selected_idx is not None:
+                    st.session_state.current_client_name = uploads[selected_idx]["CLIENT_NAME"]
+                    st.session_state.current_upload_id = uploads[selected_idx]["UPLOAD_ID"]
+            else:
+                st.sidebar.warning("No uploads available")
+        except Exception as e:
+            st.sidebar.error(f"Error loading uploads: {str(e)}")
+ 
+    # Check if we're changing pages to Contract Chat
+    if previous_page != page and page == "Contract Chat":
+        # Clear chat history when navigating to chat page
+        if "messages" in st.session_state:
+            st.session_state.messages = []
+    
+    # Update previous page for next cycle
+    st.session_state.previous_page = page
+    
+    # Main page content
     if page == "Upload Contracts":
         st.title("Contract PDF Processor")
         st.markdown("""
@@ -815,27 +973,51 @@ def main():
         The system will automatically store the files and process them using Snowflake Cortex.
         """)
         
-        st.header("Upload Contract Files")
-        
-        # Initialize session state if needed
-        if 'upload_complete' not in st.session_state:
-            st.session_state.upload_complete = False
-        
-        # Get client name
-        client_name = st.text_input("Client Name", key="client_name")
-        client_name = client_name.replace(" ", "_")
-
-        
-        # Show file uploader only if we don't have a completed upload to process
-        if not st.session_state.upload_complete:
+        # Check if we need to start a new upload
+        if st.session_state.upload_complete:
+            st.success("Your previous upload was completed successfully.")
+            if st.button("Start a New Upload"):
+                # Reset upload state
+                st.session_state.upload_complete = False
+                # Clear current upload info
+                if 'current_upload_id' in st.session_state:
+                    del st.session_state.current_upload_id
+                if 'current_client_name' in st.session_state:
+                    del st.session_state.current_client_name
+                st.rerun()
+            
+            # Show option to chat about these docs
+            st.info("You can chat about your uploaded documents in the Contract Chat section.")
+            if st.button("Go to Contract Chat"):
+                # Clear chat history before switching pages
+                if "messages" in st.session_state:
+                    st.session_state.messages = []
+                # Switch to chat page by updating session state and triggering rerun
+                st.session_state.current_page = "Contract Chat"
+                st.rerun()
+        else:
+            # Standard upload flow
+            st.header("Upload Contract Files")
+            
+            # Get client name
+            client_name = st.text_input("Client Name", key="client_name")
+            client_name = client_name.replace(" ", "_")
+            
+            # Check if client name exists
+            client_name_exists = False
+            client_name_error = st.empty()
+            
+            if client_name:
+                client_name_exists = check_client_name_exists(client_name)
+                if client_name_exists:
+                    client_name_error.error("This client name already exists. Please use a different name.")
+            
             uploaded_files = st.file_uploader("Upload PDF Contracts", 
                                             type=["pdf"], 
                                             accept_multiple_files=True,
                                             key="file_uploader")
             
-            if uploaded_files and client_name:
-                st.write(f"Number of files selected: {len(uploaded_files)}")
-                
+            if uploaded_files and client_name and not client_name_exists:               
                 file_info = []
                 for uploaded_file in uploaded_files:
                     file_info.append({
@@ -843,8 +1025,6 @@ def main():
                         "size": uploaded_file.size,
                         "type": uploaded_file.type
                     })
-                
-                st.dataframe(file_info)
                 
                 if 1 <= len(uploaded_files) <= 20:
                     upload_id = str(uuid.uuid4())
@@ -866,12 +1046,7 @@ def main():
                                 st.success("🎉 AI processing complete!")
                                 # Mark upload as complete
                                 st.session_state.upload_complete = True
-                                
-                                # Show option to chat about these docs
-                                st.info("You can now chat about these documents in the Contract Chat section.")
-                                if st.button("Go to Contract Chat"):
-                                    st.session_state.page = "Contract Chat"
-                                    st.experimental_rerun()
+                                st.rerun()
                             else:
                                 st.error("❌ There was an error during AI processing.")
                     else:
@@ -879,15 +1054,10 @@ def main():
                         
                 elif len(uploaded_files) > 20:
                     st.error("You can upload a maximum of 20 files at once")
+            elif uploaded_files and client_name and client_name_exists:
+                st.warning("Please choose a different client name before uploading files")
             elif uploaded_files and not client_name:
                 st.warning("Please enter a client name before uploading files")
-        else:
-            # Show a button to upload more files
-            if st.button("Upload More Files"):
-                st.session_state.upload_complete = False
-                # Clear session state for new upload
-                if hasattr(st, 'cache_data'):
-                    st.cache_data.clear()
     
     elif page == "Contract Chat":
         st.title("Contract Chat")
@@ -899,38 +1069,13 @@ def main():
         client_name = st.session_state.get("current_client_name", None)
         upload_id = st.session_state.get("current_upload_id", None)
         
-        if not client_name or not upload_id:
-            # Allow user to select from available uploads
-            try:
-                uploads = session.sql("""
-                SELECT upload_id, client_name, upload_timestamp, num_files 
-                FROM client_contract_uploads 
-                ORDER BY upload_timestamp DESC
-                """).collect()
-                
-                if uploads and len(uploads) > 0:
-                    st.write("Select which documents to chat about:")
-                    upload_options = [f"{row['CLIENT_NAME']} - {row['UPLOAD_TIMESTAMP']} ({row['NUM_FILES']} files)" for row in uploads]
-                    
-                    selected_idx = st.selectbox(
-                        "Available uploads:", 
-                        range(len(upload_options)),
-                        format_func=lambda x: upload_options[x]
-                    )
-                    
-                    if selected_idx is not None:
-                        client_name = uploads[selected_idx]["CLIENT_NAME"]
-                        upload_id = uploads[selected_idx]["UPLOAD_ID"]
-                        st.success(f"Chatting about documents for client: {client_name}")
-                else:
-                    st.warning("No uploads found. Please upload documents first.")
-            except Exception as e:
-                st.error(f"Error loading available uploads: {str(e)}")
-        else:
+        if client_name and upload_id:
             st.success(f"Chatting about documents for client: {client_name}")
-        
-        # Render the chat interface with context
-        render_chat_interface(client_name, upload_id)
+            
+            # Render the chat interface with context
+            render_chat_interface(client_name, upload_id)
+        else:
+            st.warning("Please select a document set from the sidebar to start chatting.")
 
 # Run the application
 if __name__ == "__main__":
