@@ -22,7 +22,7 @@ root = Root(session)
 
 # Models for chat
 MODELS = [
-    "claude-3-5-sonnet",
+    "claude-4-sonnet",
     "mistral-large2",
 ]
 
@@ -825,7 +825,7 @@ def render_chat_interface(client_name=None, upload_id=None):
                 prompt, results = create_prompt(question_safe, additional_context)
                 
                 if "model_name" not in st.session_state:
-                    st.session_state.model_name = "claude-3-5-sonnet"
+                    st.session_state.model_name = "claude-4-sonnet"
                     
                 generated_response = complete(st.session_state.model_name, prompt)
                 
