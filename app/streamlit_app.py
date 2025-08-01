@@ -166,6 +166,7 @@ def query_cortex_search_service(query, columns=[], filter={}):
     context_documents = cortex_search_service.search(
         query, 
         columns=columns, 
+        filter=filter,
         limit=st.session_state.num_retrieved_chunks
     )
     results = context_documents.results
@@ -267,16 +268,19 @@ def create_prompt(user_question, additional_context=""):
                 prompt_context, results = query_cortex_search_service(
                     question_summary,
                     columns=["chunk"],
+                    filter={"@eq": {"CLIENT_NAME": st.session_state['current_client_name']}}
                 )
             else:
                 prompt_context, results = query_cortex_search_service(
                     user_question,
                     columns=["chunk"],
+                    filter={"@eq": {"CLIENT_NAME": st.session_state['current_client_name']}}
                 )
         else:
             prompt_context, results = query_cortex_search_service(
                 user_question,
                 columns=["chunk"],
+                filter={"@eq": {"CLIENT_NAME": st.session_state['current_client_name']}}
             )
     
     # Add any additional context (e.g., from lease documents)
